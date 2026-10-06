@@ -1,0 +1,16 @@
+{
+  "_comment": "Not a real Schwung module -- chain_params lists the VST parameters of zlcomp_vst.cpp so mpc-vst-plugins' tools/gen_vst.py can generate params.h + the skin. Keys must match zlcomp_vst.cpp. Start values the plugin sets itself (start_values()). The 0..100 ranges of thresh/ratio/attack/release/schp/output are only knob travel; the plugin maps and displays the real values. The preset list must match PRESETS[] in zlcomp_vst.cpp. Only append, never reorder.",
+  "chain_params": [
+    { "key": "thresh",  "name": "Threshold", "min": 0, "max": 100 },
+    { "key": "ratio",   "name": "Ratio",     "min": 0, "max": 100 },
+    { "key": "attack",  "name": "Attack",    "min": 0, "max": 100 },
+    { "key": "release", "name": "Release",   "min": 0, "max": 100 },
+    { "key": "knee",    "name": "Knee",      "min": 0, "max": 32 },
+    { "key": "style",   "name": "Style",     "options": ["CLEAN", "CLASSIC", "OPTICAL"] },
+    { "key": "schp",    "name": "SC HP",     "min": 0, "max": 100 },
+    { "key": "mix",     "name": "Mix",       "min": 0, "max": 100 },
+    { "key": "clip",    "name": "Clip",      "min": 0, "max": 100 },
+    { "key": "output",  "name": "Output",    "min": 0, "max": 100 },
+    { "key": "preset",  "name": "Preset",    "options": ["INIT", "GLUE SOFT", "GLUE TECHNO", "GLUE GOA", "PARALLEL", "PUNCH", "OPTO SMOOTH", "LOUD"] }
+  ]
+}
