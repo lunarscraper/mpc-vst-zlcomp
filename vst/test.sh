@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Offline x86 test (ASan/UBSan) of zlcomp_vst.cpp, then a CPU benchmark (-O2): run after build.sh
-# (needs build/params.h, build/popup.h). Prints PASSED/FAILED; exit code follows.
+# (needs build/params.h, build/popup.h). Uses the host's g++ (GitHub's runner has one), else a gcc:12 container.
+# Prints PASSED/FAILED; exit code follows.
 set -euo pipefail
 cd "$(dirname "$0")"
-docker run --rm -v "$PWD":/b -w /b gcc:12 bash -euc '
+T='
   mkdir -p build/x86
   SAN="-fsanitize=address,undefined"
   g++ -O0 -g $SAN -std=c++20 -fPIC -shared -Ibuild -I. -o build/x86/zlcomp-x86.so zlcomp_vst.cpp -lpthread
@@ -13,3 +14,4 @@ docker run --rm -v "$PWD":/b -w /b gcc:12 bash -euc '
   g++ -O2 -std=c++20 -o build/x86/bench host_test.cpp -ldl
   ./build/x86/bench ./build/x86/zlcomp-o2.so bench
 '
+if command -v g++ >/dev/null; then bash -euc "$T"; else docker run --rm -v "$PWD":/b -w /b gcc:12 bash -euc "$T"; fi

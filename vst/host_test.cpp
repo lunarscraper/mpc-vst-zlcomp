@@ -1,7 +1,7 @@
 /* Offline x86 test of zlcomp_vst.cpp (test.sh builds it with ASan/UBSan): unity when RATIO is 1 or
  * MIX is 0, each style compressing by about what the curve says, RATIO, the attack letting a
  * transient through, the side-chain high-pass, linked stereo, OUTPUT, CLIP, the PRESET list, chunk
- * restore, NaN/denormal-free output. With "bench" as the second argument it only measures CPU load.
+ * restore, NaN/denormal-free output, no UpdateDisplay on host writes, the presets as VST programs. With "bench" as the second argument it only measures CPU load.
  * Prints PASSED/FAILED. */
 #include <chrono>
 #include <cmath>
@@ -30,8 +30,8 @@ struct AEffect {
     void (*processDoubleReplacing)(AEffect *, double **, double **, int32_t);
     char future[56];
 };
-static int automated = 0;
-static intptr_t master(AEffect *, int32_t op, int32_t, intptr_t, void *, float) { if (op == 0) automated++; return 0; }
+static int automated = 0, updates = 0;
+static intptr_t master(AEffect *, int32_t op, int32_t, intptr_t, void *, float) { if (op == 0) automated++; if (op == 42) updates++; return 0; }
 static int fails = 0;
 #define CHECK(c, ...) do { if (!(c)) { fails++; std::printf("FAIL: " __VA_ARGS__); std::printf("\n"); } } while (0)
 static const float SR = 44100;
@@ -285,6 +285,31 @@ int main(int argc, char **argv) {
             for (float s : l) if (!std::isfinite(s) || std::fabs(s) > 2.0f) bad = true;
         }
         silence(e, 2.0);
+    }
+
+    /* 12. MPC rules (mpc-vst-plugins 2026-10-21): no UpdateDisplay on host writes; one, after the block, on a preset;
+     *     the presets as VST programs (PRESET menu), a re-pick of the current one ignored */
+    {
+        preset(e, 0);
+        silence(e, 0.2);
+        updates = 0;
+        for (int k = 0; k < 30; k++) { thresh(e, -10 - k); ratio(e, 2 + k * 0.1); style(e, k % 3); run(e, 1000, 0.3, 0.01); }
+        CHECK(updates == 0, "host writes sent %d UpdateDisplay", updates);
+        preset(e, 5);
+        CHECK(updates == 0, "no UpdateDisplay from inside setParameter");
+        silence(e, 0.1);
+        CHECK(updates == 1, "one UpdateDisplay after a preset, got %d", updates);
+        char name[64] = {0};
+        CHECK(e->numPrograms == 8, "8 programs, got %d", e->numPrograms);
+        e->dispatcher(e, 29, 3, 0, name, 0);
+        CHECK(!std::strcmp(name, "GLUE GOA"), "program 3 name '%s'", name);
+        e->dispatcher(e, 2, 0, 3, nullptr, 0);
+        CHECK(e->dispatcher(e, 3, 0, 0, nullptr, 0) == 3 && display(e, "Preset") == "GLUE GOA" && display(e, "Release") == "350 ms",
+              "program 3: %s, %s", display(e, "Preset").c_str(), display(e, "Release").c_str());
+        release(e, 900);
+        e->dispatcher(e, 2, 0, 3, nullptr, 0);   /* same program again: ignored */
+        CHECK(display(e, "Release") == "900 ms", "a re-pick must not reload: %s", display(e, "Release").c_str());
+        silence(e, 0.1);
     }
 
     CHECK(!bad, "NaN, Inf or denormals in the output");

@@ -20,10 +20,12 @@ else
 fi
 
 # 2. params.h, skin, pluginlist-entry.xml (needs Pillow)
+#    Frame titles and option labels in Titillium Web (vst.json "title_font"; the skin builder reads it from SHADOW_TITLE_FONT,
+#    which mpc-vst-plugins' build_port.sh sets and a port's own build.sh must set itself)
 if python3 -c "import PIL" 2>/dev/null; then
-  python3 "$MPC_VST/tools/gen_vst.py" vst.json
+  SHADOW_TITLE_FONT="$PWD/fonts/TitilliumWeb-SemiBold.ttf" python3 "$MPC_VST/tools/gen_vst.py" vst.json
 else
-  docker run --rm -u "$U" -v "$PWD":/w -v "$MPC_VST":/mv:ro -w /w python:3.11-slim sh -c \
+  docker run --rm -u "$U" -e SHADOW_TITLE_FONT=/w/fonts/TitilliumWeb-SemiBold.ttf -v "$PWD":/w -v "$MPC_VST":/mv:ro -w /w python:3.11-slim sh -c \
     "pip install -q --no-warn-script-location --target /tmp/p pillow >/dev/null 2>&1; PYTHONPATH=/tmp/p python3 /mv/tools/gen_vst.py vst.json"
 fi
 cp "$MPC_VST/wrapper/popup.h" build/   # popup open-flag handling shared with mpc-vst's own wrapper

@@ -47,11 +47,13 @@ typedef struct {
 typedef struct { int32_t numEvents; intptr_t reserved; VstEvent *events[2]; } VstEvents;
 
 enum {
-    effOpen = 0, effClose = 1, effGetParamLabel = 6, effGetParamDisplay = 7, effGetParamName = 8,
+    effOpen = 0, effClose = 1, effSetProgram = 2, effGetProgram = 3, effSetProgramName = 4, effGetProgramName = 5,
+    effGetParamLabel = 6, effGetParamDisplay = 7, effGetParamName = 8,
     effSetSampleRate = 10, effSetBlockSize = 11, effMainsChanged = 12, effGetChunk = 23,
     effSetChunk = 24, effProcessEvents = 25, effCanBeAutomated = 26, effGetPlugCategory = 35,
     effGetEffectName = 45, effGetVendorString = 47, effGetProductString = 48,
-    effGetVendorVersion = 49, effCanDo = 51, effGetVstVersion = 58,
+    effGetVendorVersion = 49, effCanDo = 51, effGetVstVersion = 58, effGetProgramNameIndexed = 29,
+    effBeginSetProgram = 67, effEndSetProgram = 68,
 };
 enum { audioMasterAutomate = 0, audioMasterGetTime = 7, audioMasterUpdateDisplay = 42 };
 enum { kVstTransportPlaying = 1 << 1, kVstPpqPosValid = 1 << 9, kVstTempoValid = 1 << 10, kVstTimeSigValid = 1 << 13 };
@@ -71,6 +73,8 @@ struct Plugin {
     float open[NPARAMS] = {0};
     volatile int release[NPARAMS] = {0};
     std::atomic<bool> dirty{true};
+    std::atomic<bool> need_update{false};   /* knobs moved by a preset or a project load: one UpdateDisplay */
+    int update_wait = 0;                    /* frames until the next UpdateDisplay may go out (50 ms apart) */
     MasterComp dsp;
     MasterComp::Params p;
     std::atomic<int> preset{0};
@@ -167,6 +171,8 @@ static const Preset PRESETS[] = {
     /* LOUD        */ {0, -10, 3.0f, 6, 60, 300, 120, 100, 3.0f, 40},
 };
 static const int NPRESETS = (int)(sizeof PRESETS / sizeof PRESETS[0]);
+static const char *const PRESET_NAMES[] = {"INIT", "GLUE SOFT", "GLUE TECHNO", "GLUE GOA", "PARALLEL", "PUNCH", "OPTO SMOOTH", "LOUD"};
+static_assert(sizeof PRESET_NAMES / sizeof PRESET_NAMES[0] == sizeof PRESETS / sizeof PRESETS[0], "one name per preset");
 static void apply_preset(Plugin *w, int k) {
     const Preset &q = PRESETS[clampi(k, 0, NPRESETS - 1)];
     set_ui(w, IDX_STYLE, q.style);
@@ -180,6 +186,7 @@ static void apply_preset(Plugin *w, int k) {
     set_norm(w, IDX_OUTPUT, output_n(q.output));
     set_ui(w, IDX_CLIP, q.clip);
     w->dirty.store(true);
+    w->need_update.store(true);
 }
 
 static void processReplacing(AEffect *e, float **in, float **out, int32_t n) {
@@ -187,14 +194,39 @@ static void processReplacing(AEffect *e, float **in, float **out, int32_t n) {
     NoDenormals nd;
     if (w->dirty.exchange(false)) configure(w);
     if (n > 0) w->dsp.process(w->p, in[0], in[1], out[0], out[1], (uint32_t)n);
-    bool any = false;
+    /* As mpc-vst-plugins' shared wrapper since its 2026-10-21 fix (#486/#487): values the plugin changed itself are
+     * reported with audioMasterAutomate; an UpdateDisplay only after a preset or project load, at most one per 50 ms.
+     * A host write (touch, Q-Link, automation) never asks for one: MPC rebuilds its parameter screen on each, which
+     * broke Q-Links on the automation screen. A closed popup is reported with automate alone, as there. */
     for (int i = 0; i < NPARAMS; i++) {
-        if (w->release[i]) { w->release[i] = 0; any = true; w->master(&w->fx, audioMasterAutomate, i, 0, 0, 0.0f); }
-        if (!w->notify[i].exchange(0)) continue;
-        any = true;
-        w->master(&w->fx, audioMasterAutomate, i, 0, 0, w->cache[i].load());
+        if (w->release[i]) { w->release[i] = 0; w->master(&w->fx, audioMasterAutomate, i, 0, 0, 0.0f); }
+        if (w->notify[i].exchange(0)) w->master(&w->fx, audioMasterAutomate, i, 0, 0, w->cache[i].load());
     }
-    if (any) w->master(&w->fx, audioMasterUpdateDisplay, 0, 0, 0, 0.0f);
+    if (w->update_wait > 0) w->update_wait -= n;
+    if (w->update_wait <= 0 && w->need_update.exchange(false)) {
+        w->update_wait = 2205;
+        w->master(&w->fx, audioMasterUpdateDisplay, 0, 0, 0, 0.0f);
+    }
+}
+/* the legacy accumulating call (MPC uses processReplacing; a NULL pointer would crash a host that tried it) */
+static void process_acc(AEffect *e, float **in, float **out, int32_t n) {
+    float l[256], r[256];
+    for (int32_t at = 0; at < n; at += 256) {
+        int32_t m = n - at < 256 ? n - at : 256;
+        float *o[2] = {l, r}, *ii[2] = {in[0] + at, in[1] + at};
+        processReplacing(e, ii, o, m);
+        for (int32_t j = 0; j < m; j++) { out[0][at + j] += l[j]; out[1][at + j] += r[j]; }
+    }
+}
+
+/* The PRESET list is also MPC's PRESET menu (VST programs). Picking one there sets the PRESET entry and the knobs;
+ * a re-pick of the current one is ignored (JUCE re-picks at load, which must not undo a tweaked project). */
+static void pick_program(Plugin *w, int k) {
+    k = clampi(k, 0, NPRESETS - 1);
+    if (k == w->preset.load()) return;
+    w->preset.store(k);
+    set_ui(w, IDX_PRESET, k);
+    apply_preset(w, k);
 }
 
 static void setParameter(AEffect *e, int32_t i, float n) {
@@ -257,6 +289,7 @@ static intptr_t set_chunk(Plugin *w, const void *data, intptr_t len) {
     }
     if (IDX_PRESET >= 0) w->preset.store(clampi(ui(w, IDX_PRESET), 0, NPRESETS - 1));
     w->dirty.store(true);
+    w->need_update.store(true);
     return 1;
 }
 
@@ -310,6 +343,11 @@ static intptr_t dispatcher(AEffect *e, int32_t op, int32_t idx, intptr_t v, void
         return 1;
     case effSetBlockSize: case effMainsChanged: return 1;
     case effCanDo: return -1;
+    case effGetProgram: return w->preset.load();
+    case effSetProgram: pick_program(w, (int)v); return 1;
+    case effGetProgramName: copy_str(p, PRESET_NAMES[clampi(w->preset.load(), 0, NPRESETS - 1)], 24); return 1;
+    case effGetProgramNameIndexed: if (idx < 0 || idx >= NPRESETS) return 0; copy_str(p, PRESET_NAMES[idx], 24); return 1;
+    case effSetProgramName: case effBeginSetProgram: case effEndSetProgram: return 0;
     case effGetChunk: return get_chunk(w, (void **)p);
     case effSetChunk: return set_chunk(w, p, v);
     default: return 0;
@@ -342,6 +380,8 @@ extern "C" __attribute__((visibility("default"))) AEffect *VSTPluginMain(audioMa
     e->setParameter = setParameter;
     e->getParameter = getParameter;
     e->processReplacing = processReplacing;
+    e->process = process_acc;
+    e->numPrograms = NPRESETS;
     e->numParams = NPARAMS;
     e->numInputs = 2;
     e->numOutputs = 2;
